@@ -1,0 +1,49 @@
+{
+  "config": {
+    "step": {
+      "pick_implementation": {
+        "title": "Authenticate with Tesla"
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate with Tesla",
+        "description": "The Tesla Solar integration needs to re-authenticate your account."
+      }
+    },
+    "abort": {
+      "already_configured": "Tesla Solar is already configured.",
+      "authorize_url_timeout": "Timeout generating authorize URL.",
+      "missing_configuration": "The Tesla Solar integration is not configured. Add your Tesla developer application credentials first.",
+      "no_url_available": "No URL available. See the documentation for details.",
+      "oauth_error": "Received an invalid token response from Tesla.",
+      "oauth_failed": "Error while obtaining an access token from Tesla.",
+      "oauth_timeout": "Timeout obtaining an access token from Tesla.",
+      "oauth_unauthorized": "Tesla rejected the credentials. Check your client ID and secret.",
+      "reauth_successful": "Re-authentication was successful."
+    },
+    "create_entry": {
+      "default": "Successfully authenticated with Tesla."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Polling budget",
+        "description": "Set the maximum number of Tesla Fleet API calls per month. The integration auto-tunes its polling from this number: each refresh needs just two calls — one for **today + this month**, one for **this year + lifetime** (the slower one runs less often).\n\nAt {current}/month: today refreshes about every {today_minutes} min, year/lifetime about every {year_hours} h (≈ {est_calls} calls/month). The Fleet API free allowance is 5,000 calls/month.",
+        "data": {
+          "monthly_call_budget": "Monthly API call budget"
+        }
+      }
+    }
+  },
+  "application_credentials": {
+    "description": "Create a Tesla developer application at the [Tesla developer dashboard]({developer_dashboard_url}) and paste its Client ID and Client Secret here. Make sure the app's allowed origin/redirect includes your Home Assistant My redirect URL, and that the `energy_device_data` scope is enabled."
+  },
+  "entity": {
+    "sensor": {
+      "solar_today": { "name": "Solar today" },
+      "solar_month": { "name": "Solar this month" },
+      "solar_year": { "name": "Solar this year" },
+      "solar_lifetime": { "name": "Solar lifetime" }
+    }
+  }
+}
