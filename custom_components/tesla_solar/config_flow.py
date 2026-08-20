@@ -13,10 +13,14 @@ from homeassistant.helpers import config_entry_oauth2_flow
 
 from .const import (
     CONF_MONTHLY_BUDGET,
+    CONF_STALE_AFTER_HOURS,
     DEFAULT_MONTHLY_BUDGET,
+    DEFAULT_STALE_AFTER_HOURS,
     DOMAIN,
     MAX_MONTHLY_BUDGET,
+    MAX_STALE_AFTER_HOURS,
     MIN_MONTHLY_BUDGET,
+    MIN_STALE_AFTER_HOURS,
     SCOPE,
 )
 from .coordinator import compute_schedule
@@ -87,6 +91,9 @@ class TeslaSolarOptionsFlow(OptionsFlow):
         current = self.config_entry.options.get(
             CONF_MONTHLY_BUDGET, DEFAULT_MONTHLY_BUDGET
         )
+        stale_after = self.config_entry.options.get(
+            CONF_STALE_AFTER_HOURS, DEFAULT_STALE_AFTER_HOURS
+        )
         fast_interval, slow_every, est_calls = compute_schedule(current)
         placeholders = {
             "current": str(current),
@@ -102,7 +109,15 @@ class TeslaSolarOptionsFlow(OptionsFlow):
                 ): vol.All(
                     vol.Coerce(int),
                     vol.Range(min=MIN_MONTHLY_BUDGET, max=MAX_MONTHLY_BUDGET),
-                )
+                ),
+                vol.Required(
+                    CONF_STALE_AFTER_HOURS, default=stale_after
+                ): vol.All(
+                    vol.Coerce(int),
+                    vol.Range(
+                        min=MIN_STALE_AFTER_HOURS, max=MAX_STALE_AFTER_HOURS
+                    ),
+                ),
             }
         )
         return self.async_show_form(

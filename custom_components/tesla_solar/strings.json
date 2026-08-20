@@ -28,9 +28,10 @@
     "step": {
       "init": {
         "title": "Polling budget",
-        "description": "Set the maximum number of Tesla Fleet API calls per month. The integration auto-tunes its polling from this number: each refresh needs just two calls — one for **today + this month**, one for **this year + lifetime** (the slower one runs less often).\n\nAt {current}/month: today refreshes about every {today_minutes} min, year/lifetime about every {year_hours} h (≈ {est_calls} calls/month). The Fleet API free allowance is 5,000 calls/month.",
+        "description": "Set the maximum number of Tesla Fleet API calls per month. The integration auto-tunes its polling from this number: each refresh needs just two calls — one for **today + this month**, one for **this year + lifetime** (the slower one runs less often).\n\nAt {current}/month: today refreshes about every {today_minutes} min, year/lifetime about every {year_hours} h (≈ {est_calls} calls/month). The Fleet API free allowance is 5,000 calls/month.\n\n**Stale-data threshold** — when a site stops reporting, Tesla keeps returning HTTP 200 with zeroed buckets, so nothing looks broken. If no production has been reported for this many hours, the *Data problem* sensor turns on. Lower catches outages sooner; raise it if genuinely zero-output days trip it.",
         "data": {
-          "monthly_call_budget": "Monthly API call budget"
+          "monthly_call_budget": "Monthly API call budget",
+          "stale_after_hours": "Flag data as stale after (hours)"
         }
       }
     }
@@ -40,10 +41,29 @@
   },
   "entity": {
     "sensor": {
-      "solar_today": { "name": "Solar today" },
-      "solar_month": { "name": "Solar this month" },
-      "solar_year": { "name": "Solar this year" },
-      "solar_lifetime": { "name": "Solar lifetime" }
+      "solar_today": {
+        "name": "Solar today"
+      },
+      "solar_month": {
+        "name": "Solar this month"
+      },
+      "solar_year": {
+        "name": "Solar this year"
+      },
+      "solar_lifetime": {
+        "name": "Solar lifetime"
+      },
+      "last_production": {
+        "name": "Last reported production"
+      },
+      "last_successful_update": {
+        "name": "Last successful update"
+      }
+    },
+    "binary_sensor": {
+      "data_problem": {
+        "name": "Data problem"
+      }
     }
   }
 }
