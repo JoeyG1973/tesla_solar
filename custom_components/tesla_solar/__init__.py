@@ -9,7 +9,7 @@ from homeassistant.helpers import config_entry_oauth2_flow
 from .const import DOMAIN
 from .coordinator import TeslaSolarCoordinator
 
-PLATFORMS: list[Platform] = [Platform.SENSOR]
+PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR, Platform.SENSOR]
 
 TeslaSolarConfigEntry = ConfigEntry[TeslaSolarCoordinator]
 
