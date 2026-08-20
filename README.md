@@ -164,7 +164,7 @@ change `API_BASE`/`AUDIENCE` in `const.py` to
 ## Roadmap
 
 - Grid import/export, home usage, and battery sensors (the `live_status`
-  response already contains these fields; live solar power landed in 4.0.0).
+  response already contains these fields; live solar power landed in 0.4.0).
 - Options-flow selector for region (EU host).
 - Repairs issue (rather than just a binary sensor) when the feed goes stale.
 
