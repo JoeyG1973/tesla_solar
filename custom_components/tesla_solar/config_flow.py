@@ -12,8 +12,10 @@ from homeassistant.core import callback
 from homeassistant.helpers import config_entry_oauth2_flow
 
 from .const import (
+    CONF_LIVE_STATUS,
     CONF_MONTHLY_BUDGET,
     CONF_STALE_AFTER_HOURS,
+    DEFAULT_LIVE_STATUS,
     DEFAULT_MONTHLY_BUDGET,
     DEFAULT_STALE_AFTER_HOURS,
     DOMAIN,
@@ -94,7 +96,15 @@ class TeslaSolarOptionsFlow(OptionsFlow):
         stale_after = self.config_entry.options.get(
             CONF_STALE_AFTER_HOURS, DEFAULT_STALE_AFTER_HOURS
         )
-        fast_interval, slow_every, est_calls = compute_schedule(current)
+        live_status = self.config_entry.options.get(
+            CONF_LIVE_STATUS, DEFAULT_LIVE_STATUS
+        )
+        # The placeholders must reflect the real cadence: with live_status on
+        # every cycle costs two calls, so the same budget buys half as many
+        # refreshes.
+        fast_interval, slow_every, est_calls = compute_schedule(
+            current, calls_per_cycle=2 if live_status else 1
+        )
         placeholders = {
             "current": str(current),
             "today_minutes": str(round(fast_interval / 60, 1)),
@@ -118,6 +128,7 @@ class TeslaSolarOptionsFlow(OptionsFlow):
                         min=MIN_STALE_AFTER_HOURS, max=MAX_STALE_AFTER_HOURS
                     ),
                 ),
+                vol.Required(CONF_LIVE_STATUS, default=live_status): bool,
             }
         )
         return self.async_show_form(

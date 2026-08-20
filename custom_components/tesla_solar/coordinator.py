@@ -41,12 +41,15 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     API_BASE,
+    CONF_LIVE_STATUS,
     CONF_MONTHLY_BUDGET,
     CONF_SITE_ID,
     CONF_STALE_AFTER_HOURS,
+    DEFAULT_LIVE_STATUS,
     DEFAULT_MONTHLY_BUDGET,
     DEFAULT_STALE_AFTER_HOURS,
     DOMAIN,
+    LIVE_SOLAR_FIELD,
     MAX_CONSECUTIVE_FAILURES,
     MAX_FAST_INTERVAL,
     MAX_RETRIES,
@@ -55,6 +58,7 @@ from .const import (
     RETRY_BACKOFF,
     RETRY_STATUSES,
     SECONDS_PER_MONTH,
+    SITE_SILENT_AFTER_MINUTES,
     SLOW_TARGET_INTERVAL,
     SOLAR_FIELD,
     TIMESTAMP_FIELD,
@@ -63,30 +67,43 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
-def compute_schedule(monthly_budget: int) -> tuple[int, int, float]:
+def compute_schedule(
+    monthly_budget: int, calls_per_cycle: int = 1
+) -> tuple[int, int, float]:
     """Turn a monthly call budget into (fast_interval_s, slow_every, est_calls).
 
     Two calls exist: a *fast* one (today + this month) run every cycle, and a
     *slow* one (this year + lifetime) run every ``slow_every`` cycles. We give
     the slow call a modest fixed share (~4x/day, capped at a third of the
     budget) and spend the rest on the fast call.
+
+    ``calls_per_cycle`` is how many API calls a single fast cycle actually
+    spends. It is 1 with calendar_history alone, but 2 once live_status is
+    polled alongside it every cycle -- so each cycle costs twice as much and
+    the fast interval has to double to stay inside the same budget. Defaults to
+    1 so existing call sites and the scheduling tests are unaffected.
     """
     budget = max(1, int(monthly_budget))
+    calls_per_cycle = max(1, int(calls_per_cycle))
     # Slow call: aim for ~SLOW_TARGET_INTERVAL cadence, but never more than a
     # third of the whole budget.
     slow_per_month = min(SECONDS_PER_MONTH / SLOW_TARGET_INTERVAL, budget / 3.0)
     slow_per_month = max(1.0, slow_per_month)
-    fast_per_month = max(1.0, budget - slow_per_month)
+    fast_calls_per_month = max(1.0, budget - slow_per_month)
+    # Each fast cycle now spends calls_per_cycle calls, so the budget buys that
+    # many fewer cycles -- which is what actually sets the interval.
+    fast_cycles_per_month = max(1.0, fast_calls_per_month / calls_per_cycle)
 
-    fast_interval = SECONDS_PER_MONTH / fast_per_month
+    fast_interval = SECONDS_PER_MONTH / fast_cycles_per_month
     fast_interval = min(max(fast_interval, MIN_FAST_INTERVAL), MAX_FAST_INTERVAL)
 
     slow_target = SECONDS_PER_MONTH / slow_per_month
     slow_every = max(1, round(slow_target / fast_interval))
 
-    # Recompute the realized monthly call count after clamping/rounding.
-    actual_fast = SECONDS_PER_MONTH / fast_interval
-    est_calls = actual_fast + actual_fast / slow_every
+    # Recompute the realized monthly call count after clamping/rounding: every
+    # cycle spends calls_per_cycle, plus one slow call every slow_every cycles.
+    actual_cycles = SECONDS_PER_MONTH / fast_interval
+    est_calls = actual_cycles * calls_per_cycle + actual_cycles / slow_every
     return int(round(fast_interval)), int(slow_every), est_calls
 
 
@@ -98,7 +115,14 @@ class TeslaSolarCoordinator(DataUpdateCoordinator[dict[str, float]]):
     ) -> None:
         """Initialize the coordinator."""
         budget = int(entry.options.get(CONF_MONTHLY_BUDGET, DEFAULT_MONTHLY_BUDGET))
-        fast_interval, slow_every, est_calls = compute_schedule(budget)
+        # live_status adds a second call per fast cycle, so the schedule has to
+        # know about it up front to keep the budget honest.
+        self.live_status_enabled = bool(
+            entry.options.get(CONF_LIVE_STATUS, DEFAULT_LIVE_STATUS)
+        )
+        fast_interval, slow_every, est_calls = compute_schedule(
+            budget, calls_per_cycle=2 if self.live_status_enabled else 1
+        )
         super().__init__(
             hass,
             _LOGGER,
@@ -120,6 +144,14 @@ class TeslaSolarCoordinator(DataUpdateCoordinator[dict[str, float]]):
         self.last_successful_update: datetime | None = None
         self.last_production: datetime | None = None
         self.last_error: str | None = None
+
+        # From live_status. site_last_communication is the timestamp that still
+        # works at night; site_power is the instantaneous output that goes with
+        # it. Both stay None until the first successful live_status fetch (or
+        # forever, if the option is off) -- which site_silent treats as "not an
+        # alarm", never as silence.
+        self.site_power: float | None = None
+        self.site_last_communication: datetime | None = None
 
         _LOGGER.info(
             "Tesla Solar schedule: budget=%s/mo -> fast every %ss, slow every %s "
@@ -159,9 +191,27 @@ class TeslaSolarCoordinator(DataUpdateCoordinator[dict[str, float]]):
         return age is not None and age > self.stale_after
 
     @property
+    def site_silent(self) -> bool:
+        """True when live_status shows the site has stopped reporting to Tesla.
+
+        Complements :attr:`is_stale`: that watches the age of calendar_history
+        production buckets (hours) and is blind after sunset; this watches the
+        live_status timestamp (minutes), which keeps advancing whenever the
+        gateway is alive regardless of whether the sun is up.
+
+        None (option disabled, or no successful fetch yet) is deliberately
+        treated as *not* silent -- a missing timestamp must not manufacture a
+        phantom alarm.
+        """
+        if self.site_last_communication is None:
+            return False
+        age = dt_util.utcnow() - self.site_last_communication
+        return age > timedelta(minutes=SITE_SILENT_AFTER_MINUTES)
+
+    @property
     def has_problem(self) -> bool:
         """True when the data cannot be trusted, for any reason."""
-        return self.is_stale or not self.last_update_success
+        return self.is_stale or self.site_silent or not self.last_update_success
 
     # --- transport ----------------------------------------------------------
 
@@ -237,6 +287,38 @@ class TeslaSolarCoordinator(DataUpdateCoordinator[dict[str, float]]):
             token,
         )
         return data.get("response", {}).get("time_series", []) or []
+
+    async def _fetch_live_status(self, token: str, site_id: str) -> None:
+        """Refresh site_power / site_last_communication from live_status.
+
+        Its failures are deliberately isolated from the energy path: a
+        live_status error must NOT fail the refresh and must NOT touch
+        ``_consecutive_failures`` -- that counter is strictly about the month
+        call the four energy sensors depend on, and a live_status hiccup says
+        nothing about it. We log and carry the last-known values forward. Auth
+        failures are the one exception: they propagate so Home Assistant can
+        open a reauth flow, same as everywhere else.
+        """
+        try:
+            data = await self._api_get(
+                f"/api/1/energy_sites/{site_id}/live_status", token
+            )
+        except ConfigEntryAuthFailed:
+            raise
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Tesla Solar: failed to fetch live_status: %s", err)
+            return
+
+        resp = data.get("response") or {}
+        try:
+            self.site_power = float(resp.get(LIVE_SOLAR_FIELD))
+        except (TypeError, ValueError):
+            self.site_power = None
+        raw = resp.get(TIMESTAMP_FIELD)
+        parsed = dt_util.parse_datetime(str(raw)) if raw else None
+        self.site_last_communication = (
+            dt_util.as_utc(parsed) if parsed is not None else None
+        )
 
     # --- parsing ------------------------------------------------------------
 
@@ -340,6 +422,21 @@ class TeslaSolarCoordinator(DataUpdateCoordinator[dict[str, float]]):
                 raise
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("Tesla Solar: failed to fetch year/lifetime: %s", err)
+
+        # live_status: one call per cycle, only when enabled. It carries the
+        # last-communication timestamp -- the signal that still works at night
+        # when production is legitimately zero and stale/dark look identical.
+        if self.live_status_enabled:
+            await self._fetch_live_status(token, site_id)
+
+        if self.site_silent:
+            _LOGGER.warning(
+                "Tesla Solar: the site has not reported to Tesla since %s "
+                "(threshold %s min). It is not talking to Tesla -- check the "
+                "gateway is online and linked.",
+                self.site_last_communication,
+                SITE_SILENT_AFTER_MINUTES,
+            )
 
         if self.is_stale:
             _LOGGER.warning(

@@ -76,7 +76,12 @@ class TeslaSolarProblemSensor(
         """Explain *why*, so a notification can be actionable."""
         coordinator = self.coordinator
         age = coordinator.data_age
-        if coordinator.is_stale:
+        # Most specific first: live_status silence is the sharpest signal (it
+        # works at night), then hours-scale calendar_history staleness, then a
+        # plain call failure.
+        if coordinator.site_silent:
+            reason = "site_silent"
+        elif coordinator.is_stale:
             reason = "site_not_reporting"
         elif not coordinator.last_update_success:
             reason = "api_failing"
@@ -95,6 +100,12 @@ class TeslaSolarProblemSensor(
             "stale_after_hours": int(
                 coordinator.stale_after.total_seconds() // 3600
             ),
+            "site_last_communication": (
+                coordinator.site_last_communication.isoformat()
+                if coordinator.site_last_communication
+                else None
+            ),
+            "site_power_w": coordinator.site_power,
             "last_successful_update": (
                 coordinator.last_successful_update.isoformat()
                 if coordinator.last_successful_update

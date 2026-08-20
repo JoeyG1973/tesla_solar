@@ -31,6 +31,7 @@ rather than four.
 | `sensor.tesla_solar_solar_this_month` | Solar generated this month (kWh) |
 | `sensor.tesla_solar_solar_this_year` | Solar generated this year (kWh) |
 | `sensor.tesla_solar_solar_lifetime` | Lifetime solar generation (kWh) |
+| `sensor.tesla_solar_solar_power` | Instantaneous solar output (W), from `live_status` — requires the **Live status** option (on by default) |
 
 ### Health diagnostics
 
@@ -38,6 +39,7 @@ rather than four.
 | --- | --- |
 | `binary_sensor.tesla_solar_data_problem` | On when the figures should not be trusted — the API is failing, **or** it is succeeding while the site has stopped reporting |
 | `sensor.tesla_solar_last_reported_production` | Start of the most recent bucket that actually contained production |
+| `sensor.tesla_solar_site_last_communication` | When the site last reported to Tesla, from `live_status` — the one signal that still works at night (requires the **Live status** option) |
 | `sensor.tesla_solar_last_successful_update` | Last time the `month` call returned 200 |
 
 ## Detecting a frozen feed
@@ -84,6 +86,38 @@ intermittently, and each 5xx already gets one automatic retry); on the third
 consecutive failure the coordinator raises `UpdateFailed` so the energy
 entities go **unavailable** rather than continuing to publish stale values.
 
+### …and detecting it at night
+
+`calendar_history` staleness works in hours, off the age of the newest
+production bucket — and that signal is useless after sunset. Production is
+legitimately `0 W` at night, so a site that stopped reporting and a site that is
+simply dark return byte-identical trailing-zero buckets. If your gateway drops
+at 8pm you can't tell until the sun comes up.
+
+The **Live status** option (on by default) closes that gap. Each refresh also
+polls the `live_status` endpoint, which carries a `timestamp` recording when the
+site last reported to Tesla. That clock keeps advancing whenever the gateway is
+alive, regardless of whether the sun is up — so a stale timestamp is proof the
+site has gone quiet even when zero output is expected.
+
+- `sensor.tesla_solar_site_last_communication` shows that timestamp. Current at
+  2am → the gateway is talking to Tesla and the inverters have re-linked; hours
+  stale → they haven't.
+- `binary_sensor.tesla_solar_data_problem` also turns on when it goes silent
+  (default: no check-in for 60 min), with `reason: site_silent`. The `reason`
+  precedence is `site_silent` → `site_not_reporting` → `api_failing`.
+- `sensor.tesla_solar_solar_power` exposes the instantaneous watts from the same
+  response.
+
+A missing timestamp (option off, or no successful `live_status` fetch yet) is
+deliberately **not** treated as silence, so it never raises a phantom alarm.
+
+**Budget trade-off.** `live_status` is a second Fleet API call on every refresh,
+so at a fixed monthly budget it roughly **halves** how often everything updates.
+That's the deal: fewer refreshes in exchange for being able to spot an outage in
+the dark. Turn it off under **Configure** to spend the whole budget on the
+energy totals; the estimate on that screen reflects whichever way you set it.
+
 ## Install (HACS)
 
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=JoeyG1973&repository=tesla_solar&category=integration)
@@ -116,6 +150,11 @@ The same screen sets the **stale-data threshold** in hours (default 36, range
 12–168) used by `binary_sensor.tesla_solar_data_problem`. Lower it to catch
 outages sooner; raise it if genuinely zero-output days trip it.
 
+It also has the **Live status** toggle (on by default). With it on, each refresh
+makes two calls instead of one, so the auto-tuned interval doubles at a given
+budget — the on-screen estimate already accounts for this. See
+[Detecting a frozen feed](#and-detecting-it-at-night) for what you get in return.
+
 ## Region
 
 Defaults to the North America / Asia-Pacific Fleet API host. EU users should
@@ -124,8 +163,8 @@ change `API_BASE`/`AUDIENCE` in `const.py` to
 
 ## Roadmap
 
-- Live solar power, grid import/export, home usage, and battery sensors
-  (the `calendar_history` response already contains these fields).
+- Grid import/export, home usage, and battery sensors (the `live_status`
+  response already contains these fields; live solar power landed in 0.4.0).
 - Options-flow selector for region (EU host).
 - Repairs issue (rather than just a binary sensor) when the feed goes stale.
 
