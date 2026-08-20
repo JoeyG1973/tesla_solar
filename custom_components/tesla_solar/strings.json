@@ -28,10 +28,11 @@
     "step": {
       "init": {
         "title": "Polling budget",
-        "description": "Set the maximum number of Tesla Fleet API calls per month. The integration auto-tunes its polling from this number: each refresh needs just two calls — one for **today + this month**, one for **this year + lifetime** (the slower one runs less often).\n\nAt {current}/month: today refreshes about every {today_minutes} min, year/lifetime about every {year_hours} h (≈ {est_calls} calls/month). The Fleet API free allowance is 5,000 calls/month.\n\n**Stale-data threshold** — when a site stops reporting, Tesla keeps returning HTTP 200 with zeroed buckets, so nothing looks broken. If no production has been reported for this many hours, the *Data problem* sensor turns on. Lower catches outages sooner; raise it if genuinely zero-output days trip it.",
+        "description": "Set the maximum number of Tesla Fleet API calls per month. The integration auto-tunes its polling from this number: each refresh fetches **today + this month**, and less often **this year + lifetime** (the slower one runs on a fraction of cycles).\n\nAt {current}/month: today refreshes about every {today_minutes} min, year/lifetime about every {year_hours} h (≈ {est_calls} calls/month). The Fleet API free allowance is 5,000 calls/month.\n\n**Stale-data threshold** — when a site stops reporting, Tesla keeps returning HTTP 200 with zeroed buckets, so nothing looks broken. If no production has been reported for this many hours, the *Data problem* sensor turns on. Lower catches outages sooner; raise it if genuinely zero-output days trip it.\n\n**Live status** — also poll the site's live status each refresh. This is the only way to tell whether the site is reporting to Tesla *at all*: it timestamps when the gateway last checked in, which stays meaningful at night when production is legitimately zero. It costs one extra call per refresh, so at a fixed budget it roughly halves how often everything updates — in exchange for being able to spot an outage in the dark.",
         "data": {
           "monthly_call_budget": "Monthly API call budget",
-          "stale_after_hours": "Flag data as stale after (hours)"
+          "stale_after_hours": "Flag data as stale after (hours)",
+          "live_status": "Poll live status (last-communication check)"
         }
       }
     }
@@ -53,8 +54,14 @@
       "solar_lifetime": {
         "name": "Solar lifetime"
       },
+      "solar_power": {
+        "name": "Solar power"
+      },
       "last_production": {
         "name": "Last reported production"
+      },
+      "site_last_communication": {
+        "name": "Site last communication"
       },
       "last_successful_update": {
         "name": "Last successful update"

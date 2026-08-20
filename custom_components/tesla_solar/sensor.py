@@ -9,7 +9,7 @@ from homeassistant.components.sensor import (
 )
 from datetime import datetime
 
-from homeassistant.const import EntityCategory, UnitOfEnergy
+from homeassistant.const import EntityCategory, UnitOfEnergy, UnitOfPower
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -47,10 +47,12 @@ SENSORS: tuple[SensorEntityDescription, ...] = (
 )
 
 
-# Diagnostics. "last_production" is the one that matters: when a site stops
-# reporting, calendar_history keeps returning HTTP 200 with trailing zero
-# buckets, so the energy sensors look fine while silently frozen. This is the
-# only entity that shows it.
+# Diagnostics. "last_production" is the one that matters during the day: when a
+# site stops reporting, calendar_history keeps returning HTTP 200 with trailing
+# zero buckets, so the energy sensors look fine while silently frozen.
+# "site_last_communication" is its night-time counterpart -- the live_status
+# timestamp keeps advancing while the gateway is alive even when production is
+# legitimately zero, so it can tell a dark site from a dead one after sunset.
 DIAGNOSTIC_SENSORS: tuple[SensorEntityDescription, ...] = (
     SensorEntityDescription(
         key="last_production",
@@ -59,11 +61,28 @@ DIAGNOSTIC_SENSORS: tuple[SensorEntityDescription, ...] = (
         icon="mdi:clock-alert-outline",
     ),
     SensorEntityDescription(
+        key="site_last_communication",
+        translation_key="site_last_communication",
+        name="Site last communication",
+        icon="mdi:radio-tower",
+    ),
+    SensorEntityDescription(
         key="last_successful_update",
         translation_key="last_successful_update",
         name="Last successful update",
         icon="mdi:cloud-check-outline",
     ),
+)
+
+
+# Instantaneous solar output from live_status (watts). Unlike the four energy
+# totals this is a live power reading, not a calendar_history accumulation --
+# so it is a real production sensor, not a diagnostic.
+POWER_SENSOR = SensorEntityDescription(
+    key="solar_power",
+    translation_key="solar_power",
+    name="Solar power",
+    icon="mdi:solar-power",
 )
 
 
@@ -77,6 +96,7 @@ async def async_setup_entry(
     entities: list[SensorEntity] = [
         TeslaSolarSensor(coordinator, entry, desc) for desc in SENSORS
     ]
+    entities.append(TeslaSolarPowerSensor(coordinator, entry, POWER_SENSOR))
     entities += [
         TeslaSolarDiagnosticSensor(coordinator, entry, desc)
         for desc in DIAGNOSTIC_SENSORS
@@ -127,6 +147,37 @@ class TeslaSolarSensor(CoordinatorEntity[TeslaSolarCoordinator], SensorEntity):
             super().available
             and self.coordinator.data.get(self.entity_description.key) is not None
         )
+
+
+class TeslaSolarPowerSensor(CoordinatorEntity[TeslaSolarCoordinator], SensorEntity):
+    """Live solar power (watts) from the live_status endpoint."""
+
+    _attr_has_entity_name = True
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(
+        self,
+        coordinator: TeslaSolarCoordinator,
+        entry: TeslaSolarConfigEntry,
+        description: SensorEntityDescription,
+    ) -> None:
+        """Initialize the power sensor."""
+        super().__init__(coordinator)
+        self.entity_description = description
+        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        self._attr_device_info = _device_info(entry)
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the site's instantaneous solar output in watts."""
+        return self.coordinator.site_power
+
+    @property
+    def available(self) -> bool:
+        """Available once live_status has produced a reading."""
+        return super().available and self.coordinator.site_power is not None
 
 
 class TeslaSolarDiagnosticSensor(

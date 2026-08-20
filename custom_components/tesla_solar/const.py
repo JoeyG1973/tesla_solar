@@ -75,3 +75,25 @@ MAX_STALE_AFTER_HOURS = 168
 RETRY_STATUSES = (429, 500, 502, 503, 504)
 MAX_RETRIES = 1
 RETRY_BACKOFF = 3.0  # seconds before the single retry
+
+# --- live_status: "is the site reporting at all?" ---------------------------
+#
+# calendar_history's staleness detector (above) works in hours, off the age of
+# the newest production bucket. That signal is useless at night: production is
+# legitimately 0 W after sunset, so a site that stopped reporting and a site
+# that is simply dark produce byte-identical trailing-zero buckets.
+#
+# live_status carries a ``timestamp`` recording when the site last reported to
+# Tesla. THAT is the signal that still means something at 2am -- it keeps
+# advancing while the gateway is alive regardless of whether the sun is up, so
+# a stale timestamp is proof the site has gone quiet even when zero production
+# is expected. This is what tells you, before sunrise, whether an unplugged
+# gateway has come back and the inverters have re-linked.
+CONF_LIVE_STATUS = "live_status"
+DEFAULT_LIVE_STATUS = True
+# How stale the live_status timestamp may get before the site counts as silent.
+# Minutes, not hours: live_status updates continuously, so an hour of silence
+# already means the feed has dropped.
+SITE_SILENT_AFTER_MINUTES = 60
+# Field in the live_status response carrying instantaneous solar output (watts).
+LIVE_SOLAR_FIELD = "solar_power"

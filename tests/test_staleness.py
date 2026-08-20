@@ -73,6 +73,28 @@ class _OAuth2Session:
         return None
 
 
+class _CoordinatorEntity:
+    """Enough of CoordinatorEntity to let binary_sensor.py import and run."""
+
+    def __init__(self, coordinator):
+        self.coordinator = coordinator
+
+    def __class_getitem__(cls, item):
+        return cls
+
+
+class _BinarySensorEntity:
+    pass
+
+
+class _Enum:
+    """Tiny stand-in for the HA enums whose members we only read by name."""
+
+    def __init__(self, **members):
+        for name, value in members.items():
+            setattr(self, name, value)
+
+
 def _utcnow():
     return datetime.now(timezone.utc)
 
@@ -106,6 +128,7 @@ _module(
     "homeassistant.helpers.update_coordinator",
     DataUpdateCoordinator=_DataUpdateCoordinator,
     UpdateFailed=_UpdateFailed,
+    CoordinatorEntity=_CoordinatorEntity,
 )
 _module("homeassistant.util")
 _module(
@@ -115,6 +138,22 @@ _module(
     as_utc=_as_utc,
 )
 
+# Extra stubs, needed only to import binary_sensor.py for the reason-precedence
+# test (coordinator.py itself needs none of these).
+_module("homeassistant.const", EntityCategory=_Enum(DIAGNOSTIC="diagnostic"))
+_module("homeassistant.components")
+_module(
+    "homeassistant.components.binary_sensor",
+    BinarySensorDeviceClass=_Enum(PROBLEM="problem"),
+    BinarySensorEntity=_BinarySensorEntity,
+)
+_module(
+    "homeassistant.helpers.device_registry",
+    DeviceEntryType=_Enum(SERVICE="service"),
+    DeviceInfo=lambda **kwargs: kwargs,
+)
+_module("homeassistant.helpers.entity_platform", AddEntitiesCallback=object)
+
 _pkg = types.ModuleType("ts")
 _pkg.__path__ = [str(REPO / "custom_components" / "tesla_solar")]
 sys.modules["ts"] = _pkg
@@ -123,9 +162,20 @@ const = importlib.import_module("ts.const")
 coord = importlib.import_module("ts.coordinator")
 Coordinator = coord.TeslaSolarCoordinator
 
+# binary_sensor.py does ``from . import TeslaSolarConfigEntry`` for typing only,
+# so any object satisfies it.
+_pkg.TeslaSolarConfigEntry = _ConfigEntry
+binary_sensor = importlib.import_module("ts.binary_sensor")
+
 # Freeze "now" at the evening of the incident.
 NOW = datetime(2026, 8, 19, 21, 26, tzinfo=timezone(timedelta(hours=-4)))
 coord.dt_util.utcnow = lambda: NOW.astimezone(timezone.utc)
+
+# live_status timestamps, relative to that frozen "now" (silence threshold is
+# 60 min): FRESH is well inside it, OLD is well past it.
+NOW_UTC = NOW.astimezone(timezone.utc)
+FRESH = NOW_UTC - timedelta(minutes=5)
+OLD = NOW_UTC - timedelta(hours=3)
 
 # --------------------------------------------------------------------------
 # Fixtures
@@ -175,6 +225,11 @@ def make(options: dict | None = None) -> Coordinator:
     c.last_successful_update = None
     c.last_production = None
     c.last_error = None
+    c.live_status_enabled = bool(
+        (options or {}).get(const.CONF_LIVE_STATUS, const.DEFAULT_LIVE_STATUS)
+    )
+    c.site_power = None
+    c.site_last_communication = None
     c.data = {p: None for p in const.PERIODS}
     return c
 
@@ -186,6 +241,13 @@ async def refresh(c: Coordinator, series_or_exc, cycles: int = 1):
         return series_or_exc if period == "month" else []
 
     c._fetch_series = fetch
+    # These tests drive the calendar_history path; keep live_status inert so a
+    # cycle never reaches the (unstubbed) HTTP client. The dedicated live_status
+    # tests exercise _fetch_live_status directly.
+    async def no_live(token, site):
+        return None
+
+    c._fetch_live_status = no_live
     c._async_token = lambda: asyncio.sleep(0, result="tok")
     c._async_resolve_site = lambda token: asyncio.sleep(0, result="123")
     out = None
@@ -193,6 +255,17 @@ async def refresh(c: Coordinator, series_or_exc, cycles: int = 1):
         out = await c._async_update_data()
         c.data = out
     return out
+
+
+async def live(c: Coordinator, response_or_exc):
+    """Run one live_status fetch with a stubbed _api_get."""
+    async def api_get(path, token):
+        if isinstance(response_or_exc, Exception):
+            raise response_or_exc
+        return {"response": response_or_exc}
+
+    c._api_get = api_get
+    await c._fetch_live_status("tok", "123")
 
 
 # --------------------------------------------------------------------------
@@ -271,9 +344,112 @@ newest = monotonic.last_production
 asyncio.run(refresh(monotonic, STALLED))
 check("last_production is monotonic", monotonic.last_production, newest)
 
+# --------------------------------------------------------------------------
+# live_status: the night-time signal
+# --------------------------------------------------------------------------
+
+# A fresh timestamp means the site is talking to Tesla right now.
+fresh_site = make()
+fresh_site.site_last_communication = FRESH
+check("fresh live timestamp -> not silent", fresh_site.site_silent, False)
+
+# A stale timestamp means it has gone quiet -- and that is a problem even
+# though calendar_history staleness (is_stale) says nothing here.
+quiet = make()
+quiet.site_last_communication = OLD
+check("3 h-old live timestamp -> silent", quiet.site_silent, True)
+check("a silent site sets has_problem", quiet.has_problem, True)
+check("silence alone does not imply calendar_history staleness",
+      quiet.is_stale, False)
+
+# No timestamp yet (option off, or first fetch not landed) must never alarm.
+never = make()
+check("no live timestamp -> not silent (no phantom alarm)",
+      never.site_silent, False)
+
+# The whole point: at night solar_power is legitimately 0 with a fresh
+# timestamp. That must read as healthy, never as a fault.
+night = make()
+asyncio.run(live(night, {"solar_power": 0, "timestamp": FRESH.isoformat()}))
+check("live_status parses solar_power = 0", night.site_power, 0.0)
+check("night: 0 W with a fresh timestamp is not silent", night.site_silent, False)
+check("night: 0 W with a fresh timestamp is not a problem",
+      night.has_problem, False)
+
+# A live_status failure is isolated from the energy path: it must not raise
+# and must not touch _consecutive_failures (that counter is the month call's).
+solo_fail = make()
+raised = False
+try:
+    asyncio.run(live(solo_fail, _UpdateFailed("HTTP 503 for live_status")))
+except Exception:  # noqa: BLE001
+    raised = True
+check("a live_status failure does not raise", raised, False)
+check("a live_status failure leaves _consecutive_failures at 0",
+      solo_fail._consecutive_failures, 0)
+
+# ...and the same failure inside a full refresh still publishes month data.
+combined = make()
+combined.live_status_enabled = True
+
+
+async def _month_ok(token, site, period):
+    return HEALTHY if period == "month" else []
+
+
+async def _live_boom(path, token):
+    raise _UpdateFailed("HTTP 500 for /api/1/energy_sites/123/live_status")
+
+
+combined._fetch_series = _month_ok
+combined._api_get = _live_boom
+combined._async_token = lambda: asyncio.sleep(0, result="tok")
+combined._async_resolve_site = lambda token: asyncio.sleep(0, result="123")
+raised = False
+out = None
+try:
+    out = asyncio.run(combined._async_update_data())
+except Exception:  # noqa: BLE001
+    raised = True
+check("live_status failure does not fail the whole refresh", raised, False)
+check("month data still published despite a live_status failure",
+      out["day"], 43.74)
+check("live_status failure leaves _consecutive_failures at 0 in a full cycle",
+      combined._consecutive_failures, 0)
+
+# reason precedence in the binary sensor: site_silent is the most specific.
+both = make()
+both.site_last_communication = OLD                       # silent
+both.last_production = NOW_UTC - timedelta(hours=100)    # also stale
+ps = binary_sensor.TeslaSolarProblemSensor.__new__(
+    binary_sensor.TeslaSolarProblemSensor
+)
+ps.coordinator = both
+check("both silent and stale -> reason is site_silent",
+      ps.extra_state_attributes["reason"], "site_silent")
+check("both silent and stale still flags a problem", both.has_problem, True)
+
+# When only stale (fresh live timestamp), the reason falls through to the
+# calendar_history signal.
+stale_only = make()
+stale_only.last_production = NOW_UTC - timedelta(hours=100)
+stale_only.site_last_communication = FRESH
+ps2 = binary_sensor.TeslaSolarProblemSensor.__new__(
+    binary_sensor.TeslaSolarProblemSensor
+)
+ps2.coordinator = stale_only
+check("stale but not silent -> reason is site_not_reporting",
+      ps2.extra_state_attributes["reason"], "site_not_reporting")
+
 # Scheduling maths is untouched by these changes
 check("compute_schedule(3000)", coord.compute_schedule(3000), (900, 24, 3000.0))
 check("compute_schedule(60)", coord.compute_schedule(60), (64800, 2, 60.0))
+# With live_status on, a cycle costs two calls: the cadence halves but the
+# realized call count stays inside the same budget.
+check("compute_schedule(3000, 2) halves cadence within budget",
+      coord.compute_schedule(3000, 2), (1800, 12, 3000.0))
+check("compute_schedule(3000, 2) stays within budget",
+      coord.compute_schedule(3000, 2)[2] <= 3000, True)
 
 logging.disable(logging.NOTSET)
 print()
